@@ -80,7 +80,7 @@ static const char *TAG = "main";
 
 #define LV_TICK_PERIOD_MS (10)
 
-#define MAP_NAME "map"
+#define MAP_NAME "map2"
 #define TILE_SIZE (256)
 
 // Oliwa
@@ -244,12 +244,30 @@ static void lvgl_init(void)
     esp_timer_handle_t periodic_timer;
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, LV_TICK_PERIOD_MS * 1000));
+
+    static lv_fs_drv_t drv;
+    lv_fs_drv_init(&drv); /*Basic initialization*/
+
+    drv.letter = 'S';               /*An uppercase letter to identify the drive */
+    drv.file_size = sizeof(FILE *); /*Size required to store a file object*/
+    drv.ready_cb = ready_cb;        /*Callback to tell if the drive is ready to use */
+    drv.open_cb = open_cb;          /*Callback to open a file */
+    drv.close_cb = close_cb;        /*Callback to close a file */
+    drv.read_cb = read_cb;          /*Callback to read a file */
+    drv.seek_cb = seek_cb;          /*Callback to seek in a file (Move cursor) */
+    drv.tell_cb = tell_cb;          /*Callback to tell the cursor position  */
+
+    lv_fs_drv_register(&drv); /*Finally register the drive*/
 }
 
 void app_main(void)
 {
     BaseType_t st;
     esp_err_t ret;
+    size_t x, y;
+    uint16_t dx, dy;
+    char filename[64];
+    int n;
     // Options for mounting the filesystem.
     // If format_if_mount_failed is set to true, SD card will be partitioned and
     // formatted in case when mounting fails.
@@ -323,39 +341,26 @@ void app_main(void)
     // Card has been initialized, print its properties
     sdmmc_card_print_info(stdout, card);
 
-    static lv_fs_drv_t drv;
-    lv_fs_drv_init(&drv); /*Basic initialization*/
-
-    drv.letter = 'S';               /*An uppercase letter to identify the drive */
-    drv.file_size = sizeof(FILE *); /*Size required to store a file object*/
-    drv.ready_cb = ready_cb;        /*Callback to tell if the drive is ready to use */
-    drv.open_cb = open_cb;          /*Callback to open a file */
-    drv.close_cb = close_cb;        /*Callback to close a file */
-    drv.read_cb = read_cb;          /*Callback to read a file */
-    drv.seek_cb = seek_cb;          /*Callback to seek in a file (Move cursor) */
-    drv.tell_cb = tell_cb;          /*Callback to tell the cursor position  */
-
-    lv_fs_drv_register(&drv); /*Finally register the drive*/
-
-    st = xTaskCreatePinnedToCore(lvgl_task, "lvgl_task", 4096 * 2, NULL, 0, NULL, 1);
-    assert(st == pdPASS);
-
-    size_t x, y;
-    uint16_t dx, dy;
-    char filename[64];
-    int n;
-
     lv_obj_t *scr = lv_disp_get_scr_act(NULL);
 
     static lv_obj_t *tile;
     tile = lv_img_create(scr, NULL);
     lv_img_set_auto_size(tile, true);
 
+    static lv_obj_t *button;
+    button = lv_btn_create(scr, NULL);
+    lv_obj_set_size(button, CONFIG_LV_HOR_RES_MAX - 10, CONFIG_LV_VER_RES_MAX / 4);
+
+    lv_obj_set_style_local_bg_color(button, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_GREEN);
+    lv_obj_set_style_local_bg_opa(button, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_40);
+    lv_obj_set_style_local_border_color(button, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+    lv_obj_align(button, NULL, LV_ALIGN_IN_BOTTOM_MID, 0, 0);
+
     static lv_obj_t *label;
-    label = lv_label_create(scr, NULL);
-    lv_obj_set_style_local_text_font(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_16);
-    lv_obj_set_style_local_text_color(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_RED);
-    lv_obj_align(label, NULL, LV_ALIGN_IN_TOP_LEFT, 5, 5);
+    label = lv_label_create(button, NULL);
+    lv_obj_set_style_local_text_font(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_14);
+    lv_obj_set_style_local_text_color(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+    lv_obj_align(label, NULL, LV_ALIGN_CENTER, 5, 5);
 
     static lv_style_t style_line;
     lv_style_init(&style_line);
@@ -375,6 +380,9 @@ void app_main(void)
     lv_obj_add_style(line2, LV_LINE_PART_MAIN, &style_line);
     lv_line_set_points(line2, line_points2, 2);
 
+    st = xTaskCreatePinnedToCore(lvgl_task, "lvgl_task", 4096 * 2, NULL, 0, NULL, 0);
+    assert(st == pdPASS);
+
 #define OFFSET (-(TILE_SIZE - 240) / 2)
 
     while (1)
@@ -386,14 +394,21 @@ void app_main(void)
             n = snprintf(filename, sizeof(filename), "S:" MOUNT_POINT "/" MAP_NAME "/%d/%d/%d.bin", z, x, y);
             assert(n < sizeof(filename));
             ESP_LOGI(TAG, "Drawing image: %s", filename);
-            lv_img_set_src(tile, filename);
 
-            lv_obj_align(line1, NULL, LV_ALIGN_CENTER, dx + OFFSET - (TILE_SIZE / 2), dy + OFFSET - (TILE_SIZE / 2));
-            lv_obj_align(line2, NULL, LV_ALIGN_CENTER, dx + OFFSET - (TILE_SIZE / 2), dy + OFFSET - (TILE_SIZE / 2));
-            lv_obj_align(tile, NULL, LV_ALIGN_CENTER, OFFSET, OFFSET);
-            lv_label_set_text_fmt(label, "Lon: %lf\nLat: %lf\nZoom: %d", LOC_LAT, LOC_LON, z);
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY))
+            {
+                lv_img_set_src(tile, filename);
+
+                lv_obj_align(line1, NULL, LV_ALIGN_CENTER, dx + OFFSET - (TILE_SIZE / 2), dy + OFFSET - (TILE_SIZE / 2));
+                lv_obj_align(line2, NULL, LV_ALIGN_CENTER, dx + OFFSET - (TILE_SIZE / 2), dy + OFFSET - (TILE_SIZE / 2));
+                lv_obj_align(tile, NULL, LV_ALIGN_CENTER, OFFSET, OFFSET);
+                lv_label_set_text_fmt(label, "Lon: %lf X: %d\nLat: %lf Y: %d\nZoom: %d",
+                                      LOC_LAT, x, LOC_LON, y, z);
+                xSemaphoreGive(xGuiSemaphore);
+            }
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
     // All done, unmount partition and disable SDMMC or SPI peripheral
