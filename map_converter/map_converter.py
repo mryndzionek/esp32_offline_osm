@@ -2,6 +2,7 @@ import sys
 import os
 import math
 import subprocess
+import hashlib
 
 from functools import partial
 from PIL import Image, ImageDraw
@@ -24,7 +25,14 @@ def worker(rootdir, args, a):
         os.makedirs(os.path.dirname(out_name))
     lock.release()
     ret = subprocess.run(["php", "lv_utils/img_conv_core.php", cmd])
-    return ret.returncode
+    if ret.returncode == 0:
+        hasher = hashlib.sha1()
+        with open(out_name + '.bin', 'rb') as bi:
+            buf = bi.read()
+            hasher.update(buf)
+            return out_name, hasher.hexdigest()
+    else:
+        return None
 
 
 def init(l):
@@ -44,12 +52,23 @@ def convert_to_lvgl(rootdir, args="cf=true_color&format=bin_565_swap"):
     l = Lock()
     w = partial(worker, rootdir, args)
 
+    hash2fn = {}
+
     with Bar('Processing', max=len(tiles)) as bar:
         with Pool(initializer=init, initargs=(l,)) as pool:
-            for i in pool.imap_unordered(w, tiles):
+            for fn, hash in pool.imap_unordered(w, tiles):
                 bar.next()
-                if i != 0:
-                    print('Worker process exited with retcode: {}'.format(i))
+                if hash:
+                    if hash in hash2fn:
+                        hash2fn[hash].append(fn)
+                    else:
+                        hash2fn[hash] = [fn]
+                else:
+                    print('Worker process exited without hash')
+
+    duplicates = [(k, v) for k, v in hash2fn.items() if len(v) > 1]
+    print('{} duplicate tiles'.format(len(duplicates)))
+    print([(h, len(n)) for h, n in duplicates])
 
 
 if len(sys.argv) != 2:
