@@ -80,7 +80,6 @@ static const char *TAG = "main";
 
 #define LV_TICK_PERIOD_MS (10)
 
-#define MAP_NAME "map2"
 #define TILE_SIZE (256)
 #define NUM_TILES (4)
 
@@ -92,6 +91,10 @@ static const char *TAG = "main";
 #define LOC_LAT (54.3520)
 #define LOC_LON (18.6466)
 
+// New York
+// #define LOC_LAT (40.730610)
+// #define LOC_LON (-73.935242)
+
 #define MAX_ZOOM_LEVEL (16)
 
 typedef struct main
@@ -99,6 +102,10 @@ typedef struct main
     int8_t x;
     int8_t y;
 } tile_offset_t;
+
+static const char *const maps[] = {
+    "gdansk",
+    "world"};
 
 static SemaphoreHandle_t xGuiSemaphore;
 
@@ -121,17 +128,26 @@ static bool get_file_name(char *filename, int len, uint8_t z, size_t x, size_t y
 {
     FILE *file;
 
-    int n = snprintf(filename, len, "S:" MOUNT_POINT "/" MAP_NAME "/%d/%d/%d.bin", z, x, y);
+    for (uint8_t i = 0; i < (sizeof(maps) / sizeof(maps[0])); i++)
+    {
+        int n = snprintf(filename, len, "S:" MOUNT_POINT "/%s/%d/%d/%d.bin", maps[i], z, x, y);
+        assert(n < len);
+        if ((file = fopen(&filename[2], "r")))
+        {
+            fclose(file);
+            return true;
+        }
+    }
+
+    int n = snprintf(filename, len, "S:" MOUNT_POINT "/images/empty.bin");
     assert(n < len);
     if ((file = fopen(&filename[2], "r")))
     {
         fclose(file);
         return true;
     }
-    else
-    {
-        return false;
-    }
+
+    return false;
 }
 
 static void setup_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t y, lv_obj_t *tiles[NUM_TILES])
@@ -157,9 +173,10 @@ static void setup_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t 
         if (!((0 >= r2x) || (CONFIG_LV_HOR_RES_MAX <= r1x) || (CONFIG_LV_VER_RES_MAX <= r1y) || (0 >= r2y)))
         {
             ret = get_file_name(filename, sizeof(filename), z, x + offsets[i].x, y + offsets[i].y);
+            ESP_LOGI(TAG, "Reading image: %s", filename);
             if (ret)
             {
-                ESP_LOGI(TAG, "Drawing image -: %s", filename);
+                ESP_LOGI(TAG, "Image exists");
                 lv_img_set_src(tiles[j], filename);
                 lv_obj_align(tiles[j++], NULL, LV_ALIGN_IN_TOP_LEFT, r1x, r1y);
             }
@@ -429,7 +446,7 @@ void app_main(void)
     static lv_obj_t *label;
     label = lv_label_create(button, NULL);
     lv_obj_set_style_local_text_font(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_14);
-    lv_obj_set_style_local_text_color(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+    lv_obj_set_style_local_text_color(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
     lv_obj_align(label, NULL, LV_ALIGN_CENTER, 5, 5);
 
     static lv_style_t style_line;
@@ -472,7 +489,7 @@ void app_main(void)
                                       LOC_LAT, x, LOC_LON, y, z);
                 xSemaphoreGive(xGuiSemaphore);
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(2000));
         }
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
