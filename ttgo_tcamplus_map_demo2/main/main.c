@@ -97,11 +97,20 @@ static const char *TAG = "main";
 
 #define MAX_ZOOM_LEVEL (16)
 
-typedef struct main
+typedef struct
 {
     int8_t x;
     int8_t y;
 } tile_offset_t;
+
+typedef struct
+{
+    lv_obj_t *img;
+    uint16_t x;
+    uint16_t y;
+    uint8_t z;
+    bool is_visible;
+} tile_t;
 
 static const char *const maps[] = {
     "gdansk",
@@ -150,12 +159,9 @@ static bool get_file_name(char *filename, int len, uint8_t z, size_t x, size_t y
     return false;
 }
 
-static void setup_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t y, lv_obj_t *tiles[NUM_TILES])
+static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t y, tile_t tiles[NUM_TILES])
 {
-    const tile_offset_t offsets[9] = {{0, 0}, {0, -1},{1, -1},
-                                              {1, 0}, {1, 1},
-                                              {0, 1}, {-1, 1},
-                                              {-1, 0}, {-1, -1}};
+    const tile_offset_t offsets[9] = {{0, 0}, {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}};
     int16_t r1x, r1y, r2x, r2y;
     uint8_t vc = 0, j = 0;
     char filename[64];
@@ -176,9 +182,14 @@ static void setup_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t 
             ESP_LOGI(TAG, "Reading image: %s", filename);
             if (ret)
             {
+                tile_t *t = &tiles[j];
                 ESP_LOGI(TAG, "Image exists");
-                lv_img_set_src(tiles[j], filename);
-                lv_obj_align(tiles[j++], NULL, LV_ALIGN_IN_TOP_LEFT, r1x, r1y);
+                lv_img_set_src(t->img, filename);
+                t->x = x + offsets[i].x;
+                t->y = y + offsets[i].y;
+                t->is_visible = true;
+                lv_obj_align(t->img, NULL, LV_ALIGN_IN_TOP_LEFT, r1x, r1y);
+                j++;
             }
             vc++;
             assert(vc <= NUM_TILES);
@@ -190,7 +201,9 @@ static void setup_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t 
 
     for (uint8_t i = j; i < NUM_TILES; i++)
     {
-        lv_obj_align(tiles[i], NULL, LV_ALIGN_IN_TOP_LEFT, -300, -300);
+        tile_t *t = &tiles[i];;
+        t->is_visible = false;
+        lv_obj_align(t->img, NULL, LV_ALIGN_IN_TOP_LEFT, -300, -300);
     }
 }
 
@@ -426,12 +439,13 @@ void app_main(void)
 
     lv_obj_t *scr = lv_disp_get_scr_act(NULL);
 
-    static lv_obj_t *tiles[NUM_TILES];
+    static tile_t tiles[NUM_TILES];
     for (uint8_t i = 0; i < NUM_TILES; i++)
     {
-        tiles[i] = lv_img_create(scr, NULL);
-        lv_img_set_auto_size(tiles[i], true);
-        lv_obj_align(tiles[i], NULL, LV_ALIGN_IN_TOP_LEFT, -300, -300);
+        tiles[i].img = lv_img_create(scr, NULL);
+        lv_img_set_auto_size(tiles[i].img, true);
+        tiles[i].is_visible = false;
+        lv_obj_align(tiles[i].img, NULL, LV_ALIGN_IN_TOP_LEFT, -300, -300);
     }
 
     static lv_obj_t *button;
@@ -484,14 +498,34 @@ void app_main(void)
             {
                 px = (CONFIG_LV_HOR_RES_MAX / 2) - dx;
                 py = (CONFIG_LV_VER_RES_MAX / 2) - dy;
-                setup_tiles(px, py, z, x, y, tiles);
+                update_tiles(px, py, z, x, y, tiles);
                 lv_label_set_text_fmt(label, "Lon: %lf X: %d\nLat: %lf Y: %d\nZoom: %d",
                                       LOC_LAT, x, LOC_LON, y, z);
                 xSemaphoreGive(xGuiSemaphore);
             }
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));
+
+        double lon = LOC_LON;
+        double lat = LOC_LAT;
+
+        for (uint8_t i = 0; i < 120; i++)
+        {
+            lat += 0.0008;
+            lon -= 0.0008;
+
+            deg2num(lat, lon, MAX_ZOOM_LEVEL, &x, &y, &dx, &dy);
+            if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY))
+            {
+                px = (CONFIG_LV_HOR_RES_MAX / 2) - dx;
+                py = (CONFIG_LV_VER_RES_MAX / 2) - dy;
+                update_tiles(px, py, MAX_ZOOM_LEVEL, x, y, tiles);
+                lv_label_set_text_fmt(label, "Lon: %lf X: %d\nLat: %lf Y: %d\nZoom: %d",
+                                      lat, x, lon, y, MAX_ZOOM_LEVEL);
+                xSemaphoreGive(xGuiSemaphore);
+            }
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
     }
 
     // All done, unmount partition and disable SDMMC or SPI peripheral
