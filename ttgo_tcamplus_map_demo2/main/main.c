@@ -31,6 +31,9 @@
 #include "driver/sdmmc_host.h"
 #endif
 
+#define DISP_HOR_RES_MAX (240)
+#define DISP_VER_RES_MAX (240)
+
 static const char *TAG = "main";
 
 #define MOUNT_POINT "/sdcard"
@@ -176,7 +179,7 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
         ESP_LOGD(TAG, "%d, %d", offsets[i].x, offsets[i].y);
         ESP_LOGD(TAG, "%d, %d, %d, %d", r1x, r1y, r2x, r2y);
 
-        if (!((0 >= r2x) || (CONFIG_LV_HOR_RES_MAX <= r1x) || (CONFIG_LV_VER_RES_MAX <= r1y) || (0 >= r2y)))
+        if (!((0 >= r2x) || (DISP_HOR_RES_MAX <= r1x) || (DISP_VER_RES_MAX <= r1y) || (0 >= r2y)))
         {
             ret = get_file_name(filename, sizeof(filename), z, x + offsets[i].x, y + offsets[i].y);
             ESP_LOGI(TAG, "Reading image: %s", filename);
@@ -188,7 +191,7 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
                 t->x = x + offsets[i].x;
                 t->y = y + offsets[i].y;
                 t->is_visible = true;
-                lv_obj_align(t->img, NULL, LV_ALIGN_IN_TOP_LEFT, r1x, r1y);
+                lv_obj_align(t->img, LV_ALIGN_TOP_LEFT, r1x, r1y);
                 j++;
             }
             vc++;
@@ -203,7 +206,7 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
     {
         tile_t *t = &tiles[i];;
         t->is_visible = false;
-        lv_obj_align(t->img, NULL, LV_ALIGN_IN_TOP_LEFT, -300, -300);
+        lv_obj_align(t->img, LV_ALIGN_TOP_LEFT, -300, -300);
     }
 }
 
@@ -229,41 +232,52 @@ static void lvgl_task(void *pvParameter)
     }
 }
 
-static lv_fs_res_t open_cb(struct _lv_fs_drv_t *drv, void *file_p, const char *path, lv_fs_mode_t mode)
+static void *open_cb(struct _lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode)
 {
-    (void)drv;
-    (void)mode;
+    (void) drv;
+    (void) mode;
 
     FILE *fp = fopen(path, "rb"); // only reading is supported
-
-    *((FILE **)file_p) = fp;
-    return NULL == fp ? LV_FS_RES_UNKNOWN : LV_FS_RES_OK;
+    return fp;
 }
 
 static lv_fs_res_t close_cb(struct _lv_fs_drv_t *drv, void *file_p)
 {
-    (void)drv;
+    (void) drv;
 
-    FILE *fp = *((FILE **)file_p);
-    fclose(fp);
+    fclose(file_p);
     return LV_FS_RES_OK;
 }
 
 static lv_fs_res_t read_cb(struct _lv_fs_drv_t *drv, void *file_p, void *buf, uint32_t btr, uint32_t *br)
 {
-    (void)drv;
+    (void) drv;
 
-    FILE *fp = *((FILE **)file_p);
-    *br = fread(buf, 1, btr, fp);
+    *br = fread(buf, 1, btr, file_p);
     return (*br <= 0) ? LV_FS_RES_UNKNOWN : LV_FS_RES_OK;
 }
 
-static lv_fs_res_t seek_cb(struct _lv_fs_drv_t *drv, void *file_p, uint32_t pos)
+static lv_fs_res_t seek_cb(struct _lv_fs_drv_t *drv, void *file_p, uint32_t pos, lv_fs_whence_t w)
 {
     (void)drv;
 
-    FILE *fp = *((FILE **)file_p);
-    fseek(fp, pos, SEEK_SET);
+    uint32_t w2;
+    switch (w)
+    {
+    case LV_FS_SEEK_SET:
+        w2 = SEEK_SET;
+        break;
+    case LV_FS_SEEK_CUR:
+        w2 = SEEK_CUR;
+        break;
+    case LV_FS_SEEK_END:
+        w2 = SEEK_END;
+        break;
+    default:
+        w2 = SEEK_SET;
+    }
+
+    fseek(file_p, pos, w2);
 
     return LV_FS_RES_OK;
 }
@@ -272,9 +286,7 @@ static lv_fs_res_t tell_cb(struct _lv_fs_drv_t *drv, void *file_p, uint32_t *pos
 {
     (void)drv;
 
-    FILE *fp = *((FILE **)file_p);
-    *pos_p = ftell(fp);
-
+    *pos_p = ftell(file_p);
     return LV_FS_RES_OK;
 }
 
@@ -305,9 +317,7 @@ static void lvgl_init(void)
     static lv_color_t *buf2 = NULL;
 #endif
 
-    static lv_disp_buf_t disp_buf;
-
-    uint32_t size_in_px = DISP_BUF_SIZE;
+    static lv_disp_draw_buf_t disp_buf;
 
 #if defined CONFIG_LV_TFT_DISPLAY_CONTROLLER_IL3820 || defined CONFIG_LV_TFT_DISPLAY_CONTROLLER_JD79653A || defined CONFIG_LV_TFT_DISPLAY_CONTROLLER_UC8151D || defined CONFIG_LV_TFT_DISPLAY_CONTROLLER_SSD1306
 
@@ -317,10 +327,12 @@ static void lvgl_init(void)
 
     /* Initialize the working buffer depending on the selected display.
      * NOTE: buf2 == NULL when using monochrome displays. */
-    lv_disp_buf_init(&disp_buf, buf1, buf2, size_in_px);
+    lv_disp_draw_buf_init(&disp_buf, buf1, buf2, DISP_BUF_SIZE);
 
-    lv_disp_drv_t disp_drv;
+    static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = DISP_HOR_RES_MAX;
+    disp_drv.ver_res = DISP_VER_RES_MAX;
     disp_drv.flush_cb = disp_driver_flush;
 
     /* When using a monochrome display we need to register the callbacks:
@@ -331,7 +343,7 @@ static void lvgl_init(void)
     disp_drv.set_px_cb = disp_driver_set_px;
 #endif
 
-    disp_drv.buffer = &disp_buf;
+    disp_drv.draw_buf = &disp_buf;
     lv_disp_drv_register(&disp_drv);
 
     /* Create and start a periodic timer interrupt to call lv_tick_inc */
@@ -346,8 +358,7 @@ static void lvgl_init(void)
     lv_fs_drv_init(&drv); /*Basic initialization*/
 
     drv.letter = 'S';               /*An uppercase letter to identify the drive */
-    drv.file_size = sizeof(FILE *); /*Size required to store a file object*/
-    drv.ready_cb = ready_cb;        /*Callback to tell if the drive is ready to use */
+    drv.ready_cb = ready_cb;
     drv.open_cb = open_cb;          /*Callback to open a file */
     drv.close_cb = close_cb;        /*Callback to close a file */
     drv.read_cb = read_cb;          /*Callback to read a file */
@@ -438,51 +449,52 @@ void app_main(void)
     sdmmc_card_print_info(stdout, card);
 
     lv_obj_t *scr = lv_disp_get_scr_act(NULL);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     static tile_t tiles[NUM_TILES];
     for (uint8_t i = 0; i < NUM_TILES; i++)
     {
-        tiles[i].img = lv_img_create(scr, NULL);
-        lv_img_set_auto_size(tiles[i].img, true);
+        tiles[i].img = lv_img_create(scr);
         tiles[i].is_visible = false;
-        lv_obj_align(tiles[i].img, NULL, LV_ALIGN_IN_TOP_LEFT, -300, -300);
+        lv_obj_align(tiles[i].img, LV_ALIGN_TOP_LEFT, -300, -300);
     }
 
     static lv_obj_t *button;
-    button = lv_btn_create(scr, NULL);
-    lv_obj_set_size(button, CONFIG_LV_HOR_RES_MAX - 10, CONFIG_LV_VER_RES_MAX / 4);
+    button = lv_btn_create(scr);
+    lv_obj_set_size(button, DISP_HOR_RES_MAX - 30, DISP_VER_RES_MAX / 4);
 
-    lv_obj_set_style_local_bg_color(button, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_GREEN);
-    lv_obj_set_style_local_bg_opa(button, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_OPA_40);
-    lv_obj_set_style_local_border_color(button, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
-    lv_obj_align(button, NULL, LV_ALIGN_IN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(button, lv_palette_main(LV_PALETTE_GREEN), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(button, LV_OPA_50, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(button, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(button, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     static lv_obj_t *label;
-    label = lv_label_create(button, NULL);
-    lv_obj_set_style_local_text_font(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_14);
-    lv_obj_set_style_local_text_color(label, LV_LABEL_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_WHITE);
-    lv_obj_align(label, NULL, LV_ALIGN_CENTER, 5, 5);
+    label = lv_label_create(button);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(label, lv_color_white(), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_align(label, LV_ALIGN_CENTER, 5, 0);
 
     static lv_style_t style_line;
     lv_style_init(&style_line);
-    lv_style_set_line_width(&style_line, LV_STATE_DEFAULT, 4);
-    lv_style_set_line_color(&style_line, LV_STATE_DEFAULT, LV_COLOR_RED);
-    lv_style_set_line_rounded(&style_line, LV_STATE_DEFAULT, true);
+    lv_style_set_line_width (&style_line, 4);
+    lv_style_set_line_color(&style_line, lv_palette_main(LV_PALETTE_RED));
+    lv_style_set_line_rounded(&style_line, true);
 
     lv_point_t line_points1[2] = {{0, 0}, {15, 0}};
     lv_obj_t *line1;
-    line1 = lv_line_create(scr, NULL);
-    lv_obj_add_style(line1, LV_LINE_PART_MAIN, &style_line);
+    line1 = lv_line_create(scr);
+    lv_obj_add_style(line1, &style_line, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_line_set_points(line1, line_points1, 2);
 
     lv_point_t line_points2[2] = {{0, 0}, {0, 15}};
     lv_obj_t *line2;
-    line2 = lv_line_create(scr, NULL);
-    lv_obj_add_style(line2, LV_LINE_PART_MAIN, &style_line);
+    line2 = lv_line_create(scr);
+    lv_obj_add_style(line2, &style_line, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_line_set_points(line2, line_points2, 2);
 
-    lv_obj_align(line1, NULL, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_align(line2, NULL, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(line1, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(line2, LV_ALIGN_CENTER, 0, 0);
 
     st = xTaskCreatePinnedToCore(lvgl_task, "lvgl_task", 4096 * 2, NULL, 5, NULL, 0);
     assert(st == pdPASS);
@@ -496,8 +508,8 @@ void app_main(void)
             deg2num(LOC_LAT, LOC_LON, z, &x, &y, &dx, &dy);
             if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY))
             {
-                px = (CONFIG_LV_HOR_RES_MAX / 2) - dx;
-                py = (CONFIG_LV_VER_RES_MAX / 2) - dy;
+                px = (DISP_HOR_RES_MAX / 2) - dx;
+                py = (DISP_VER_RES_MAX / 2) - dy;
                 update_tiles(px, py, z, x, y, tiles);
                 lv_label_set_text_fmt(label, "Lon: %lf X: %d\nLat: %lf Y: %d\nZoom: %d",
                                       LOC_LAT, x, LOC_LON, y, z);
@@ -517,8 +529,8 @@ void app_main(void)
             deg2num(lat, lon, MAX_ZOOM_LEVEL, &x, &y, &dx, &dy);
             if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY))
             {
-                px = (CONFIG_LV_HOR_RES_MAX / 2) - dx;
-                py = (CONFIG_LV_VER_RES_MAX / 2) - dy;
+                px = (DISP_HOR_RES_MAX / 2) - dx;
+                py = (DISP_VER_RES_MAX / 2) - dy;
                 update_tiles(px, py, MAX_ZOOM_LEVEL, x, y, tiles);
                 lv_label_set_text_fmt(label, "Lon: %lf X: %d\nLat: %lf Y: %d\nZoom: %d",
                                       lat, x, lon, y, MAX_ZOOM_LEVEL);
