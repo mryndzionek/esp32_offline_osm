@@ -384,7 +384,7 @@ void app_main(void)
 #else
         .format_if_mount_failed = false,
 #endif // EXAMPLE_FORMAT_IF_MOUNT_FAILED
-        .max_files = 5,
+        .max_files = 2 + LV_IMG_CACHE_DEF_SIZE,
         .allocation_unit_size = 16 * 1024};
     sdmmc_card_t *card;
     const char mount_point[] = MOUNT_POINT;
