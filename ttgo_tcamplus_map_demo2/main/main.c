@@ -138,24 +138,20 @@ static void deg2num(double lat, double lon, uint8_t zoom,
 
 static bool get_file_name(char *filename, int len, uint8_t z, size_t x, size_t y)
 {
-    FILE *file;
-
     for (uint8_t i = 0; i < (sizeof(maps) / sizeof(maps[0])); i++)
     {
         int n = snprintf(filename, len, "S:" MOUNT_POINT "/%s/%d/%d/%d.bin", maps[i], z, x, y);
         assert(n < len);
-        if ((file = fopen(&filename[2], "r")))
+        if (access(&filename[2], F_OK) == 0)
         {
-            fclose(file);
             return true;
         }
     }
 
     int n = snprintf(filename, len, "S:" MOUNT_POINT "/images/empty.bin");
     assert(n < len);
-    if ((file = fopen(&filename[2], "r")))
+    if (access(&filename[2], F_OK) == 0)
     {
-        fclose(file);
         return true;
     }
 
@@ -186,12 +182,12 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
             if (ret)
             {
                 tile_t *t = &tiles[j];
-                ESP_LOGI(TAG, "Image exists");
-                lv_img_set_src(t->img, filename);
+                ESP_LOGD(TAG, "Image exists");
                 t->x = x + offsets[i].x;
                 t->y = y + offsets[i].y;
                 t->is_visible = true;
                 lv_obj_align(t->img, LV_ALIGN_TOP_LEFT, r1x, r1y);
+                lv_img_set_src(t->img, filename);
                 j++;
             }
             vc++;
@@ -422,6 +418,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Using SPI peripheral");
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    // host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS;
     slot_config.host_id = host.slot;
@@ -521,10 +518,10 @@ void app_main(void)
         double lon = LOC_LON;
         double lat = LOC_LAT;
 
-        for (uint8_t i = 0; i < 120; i++)
+        while (true)
         {
-            lat += 0.0008;
-            lon -= 0.0008;
+            lat += 0.0001 * ((int)(esp_random() % 7) - 3);
+            lon += 0.0001 * ((int)(esp_random() % 7) - 3);
 
             deg2num(lat, lon, MAX_ZOOM_LEVEL, &x, &y, &dx, &dy);
             if (pdTRUE == xSemaphoreTake(xGuiSemaphore, portMAX_DELAY))
@@ -536,7 +533,7 @@ void app_main(void)
                                       lat, x, lon, y, MAX_ZOOM_LEVEL);
                 xSemaphoreGive(xGuiSemaphore);
             }
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 
