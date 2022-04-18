@@ -456,14 +456,18 @@ void app_main(void)
         lv_obj_align(tiles[i].img, LV_ALIGN_TOP_LEFT, -300, -300);
     }
 
+    static lv_style_t style_button;
+    lv_style_init(&style_button);
+    lv_style_set_bg_color(&style_button, lv_palette_main(LV_PALETTE_GREEN));
+    lv_style_set_bg_opa(&style_button, LV_OPA_50);
+    lv_style_set_border_color(&style_button, lv_color_black());
+    lv_style_set_border_width(&style_button, 2);
+    lv_style_set_radius(&style_button, 8);
+
     static lv_obj_t *button;
     button = lv_btn_create(scr);
     lv_obj_set_size(button, DISP_HOR_RES_MAX - 30, DISP_VER_RES_MAX / 4);
-
-    lv_obj_set_style_bg_color(button, lv_palette_main(LV_PALETTE_GREEN), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(button, LV_OPA_50, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(button, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(button, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_add_style(button, &style_button, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_align(button, LV_ALIGN_BOTTOM_MID, 0, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     static lv_obj_t *label;
@@ -493,7 +497,7 @@ void app_main(void)
     lv_obj_align(line1, LV_ALIGN_CENTER, 0, 0);
     lv_obj_align(line2, LV_ALIGN_CENTER, 0, 0);
 
-    st = xTaskCreatePinnedToCore(lvgl_task, "lvgl_task", 4096 * 2, NULL, 5, NULL, 0);
+    st = xTaskCreatePinnedToCore(lvgl_task, "lvgl_task", 4096 * 2, NULL, 5, NULL, tskNO_AFFINITY);
     assert(st == pdPASS);
 
     while (1)
