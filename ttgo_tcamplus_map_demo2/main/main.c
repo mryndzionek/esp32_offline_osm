@@ -20,6 +20,9 @@
 #include "sdmmc_cmd.h"
 #include "sdkconfig.h"
 
+#include "osi/hash_map.h"
+#include "osi/hash_functions.h"
+
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE
 #include "lvgl.h"
 #else
@@ -51,12 +54,12 @@ static const char *TAG = "main";
 #endif // USE_SPI_MODE
 // on ESP32-S2, DMA channel must be the same as host id
 #define SPI_DMA_CHAN host.slot
-#endif //CONFIG_IDF_TARGET_ESP32S2
+#endif // CONFIG_IDF_TARGET_ESP32S2
 
 // DMA channel to be used by the SPI peripheral
 #ifndef SPI_DMA_CHAN
 #define SPI_DMA_CHAN 1
-#endif //SPI_DMA_CHAN
+#endif // SPI_DMA_CHAN
 
 // When testing SD and SPI modes, keep in mind that once the card has been
 // initialized in SPI mode, it can not be reinitialized in SD mode without
@@ -78,13 +81,16 @@ static const char *TAG = "main";
 #define PIN_NUM_CLK 8
 #define PIN_NUM_CS 19
 
-#endif //CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2
-#endif //USE_SPI_MODE
+#endif // CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2
+#endif // USE_SPI_MODE
 
 #define LV_TICK_PERIOD_MS (10)
 
 #define TILE_SIZE (256)
 #define NUM_TILES (4)
+
+#define IMG_CACHE_SIZE (2 * (NUM_TILES + 2))
+#define IMG_CACHE_KEY_SIZE (10)
 
 // Oliwa
 // #define LOC_LAT (54.41270414275709)
@@ -115,11 +121,36 @@ typedef struct
     bool is_visible;
 } tile_t;
 
+typedef struct
+{
+    lv_img_dsc_t dsc;
+    int16_t count;
+} img_cache_entry_t;
+
+typedef struct
+{
+    const void *key;
+    size_t count;
+} img_cache_iter_ctx_t;
+
 static const char *const maps[] = {
     "gdansk",
     "world"};
 
 static SemaphoreHandle_t xGuiSemaphore;
+static hash_map_t *img_cache;
+
+bool cache_equality_fn(const void *x, const void *y)
+{
+    return strcmp(x, y) == 0;
+}
+
+void cache_data_free_fn(void *data)
+{
+    img_cache_entry_t *entry = data;
+    free((void *)entry->dsc.data);
+    free(data);
+}
 
 static void deg2num(double lat, double lon, uint8_t zoom,
                     size_t *x, size_t *y, uint16_t *dx, uint16_t *dy)
@@ -141,6 +172,7 @@ static bool get_file_name(char *filename, int len, uint8_t z, size_t x, size_t y
     for (uint8_t i = 0; i < (sizeof(maps) / sizeof(maps[0])); i++)
     {
         int n = snprintf(filename, len, "S:" MOUNT_POINT "/%s/%d/%d/%d.bin", maps[i], z, x, y);
+        ESP_LOGI(TAG, "---> l: %s", filename);
         assert(n < len);
         if (access(&filename[2], F_OK) == 0)
         {
@@ -158,6 +190,65 @@ static bool get_file_name(char *filename, int len, uint8_t z, size_t x, size_t y
     return false;
 }
 
+static void *read_file_to_mem(const char *const filename)
+{
+    int ret;
+    FILE *fp = fopen(filename, "rb");
+    assert(fp);
+
+    ret = fseek(fp, 0, SEEK_END);
+    assert(ret == 0);
+    long fsize = ftell(fp) - 4;
+    ESP_LOGD(TAG, "filesize: %ld", fsize);
+    ret = fseek(fp, 4, SEEK_SET);
+    assert(ret == 0);
+
+    char *buff = heap_caps_malloc(fsize + 1, MALLOC_CAP_SPIRAM);
+    assert(buff);
+    fread(buff, fsize, 1, fp);
+
+    fclose(fp);
+
+    return buff;
+}
+
+static bool img_cache_min_cb(hash_map_entry_t *hash_entry, void *context)
+{
+    img_cache_iter_ctx_t *ctx = context;
+    img_cache_entry_t *entry = hash_entry->data;
+
+    if (entry->count > 0)
+    {
+        if (ctx->count == -2)
+        {
+            ctx->count = entry->count;
+            ctx->key = hash_entry->key;
+        }
+        else
+        {
+            if (entry->count <= ctx->count)
+            {
+                ctx->count = entry->count;
+                ctx->key = hash_entry->key;
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool img_cache_up_cb(hash_map_entry_t *hash_entry, void *context)
+{
+    img_cache_entry_t *entry = hash_entry->data;
+
+    if (entry->count < 16)
+    {
+        entry->count++;
+    }
+
+    return true;
+}
+
 static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t y, tile_t tiles[NUM_TILES])
 {
     const tile_offset_t offsets[9] = {{0, 0}, {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}};
@@ -165,6 +256,7 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
     uint8_t vc = 0, j = 0;
     char filename[64];
     bool ret;
+    static size_t c_size = 0;
 
     for (uint8_t i = 0; i < (sizeof(offsets) / sizeof(offsets[0])); i++)
     {
@@ -181,13 +273,72 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
             ESP_LOGI(TAG, "Reading image: %s", filename);
             if (ret)
             {
+                size_t ks = strnlen(filename, sizeof(filename));
+                char *key = malloc(ks + 1);
+                assert(key);
+
+                memcpy(key, filename, ks + 1);
+
+                ESP_LOGD(TAG, "Key %s", key);
+
+                if (!hash_map_has_key(img_cache, (void *)key))
+                {
+                    ESP_LOGI(TAG, "Image not in cache");
+
+                    if (c_size >= IMG_CACHE_SIZE)
+                    {
+                        ESP_LOGI(TAG, "Trying to make space");
+                        img_cache_iter_ctx_t ctx;
+                        ctx.count = -2;
+                        ctx.key = NULL;
+                        hash_map_foreach(img_cache, img_cache_min_cb, &ctx);
+                        if (ctx.key)
+                        {
+                            ESP_LOGI(TAG, "Minimum key: %s %d", (char *)ctx.key, ctx.count);
+                            c_size--;
+                            bool r = hash_map_erase(img_cache, ctx.key);
+                            assert(r);
+                        }
+                    }
+
+                    img_cache_entry_t *c_entry = malloc(sizeof(img_cache_entry_t));
+                    assert(c_entry);
+                    c_entry->dsc.header.always_zero = 0;
+                    c_entry->dsc.header.w = TILE_SIZE;
+                    c_entry->dsc.header.h = TILE_SIZE;
+                    c_entry->dsc.data_size = TILE_SIZE * TILE_SIZE * LV_COLOR_DEPTH / 8;
+                    c_entry->dsc.header.cf = LV_IMG_CF_TRUE_COLOR;
+                    c_entry->dsc.data = read_file_to_mem(&filename[2]);
+                    assert(c_entry->dsc.data);
+                    c_entry->count = -1;
+
+                    hash_map_erase(img_cache, key);
+                    if (!hash_map_set(img_cache, (void *)key, (void *)c_entry))
+                    {
+                        ESP_LOGE(TAG, "Failed to insert cache entry!!!");
+                    }
+                    else
+                    {
+                        c_size++;
+                    }
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "File in cache");
+                }
+
+                ESP_LOGD(TAG, "cache size: %u", c_size);
+                img_cache_entry_t *c_entry = hash_map_get(img_cache, (void *)key);
+                assert(c_entry);
+                c_entry->count = -1;
+
                 tile_t *t = &tiles[j];
                 ESP_LOGD(TAG, "Image exists");
                 t->x = x + offsets[i].x;
                 t->y = y + offsets[i].y;
                 t->is_visible = true;
+                lv_img_set_src(t->img, &c_entry->dsc);
                 lv_obj_align(t->img, LV_ALIGN_TOP_LEFT, r1x, r1y);
-                lv_img_set_src(t->img, filename);
                 j++;
             }
             vc++;
@@ -198,9 +349,11 @@ static void update_tiles(int16_t cx, int16_t cy, uint8_t z, uint16_t x, uint16_t
     }
     ESP_LOGD(TAG, "Visible count: %d", vc);
 
+    hash_map_foreach(img_cache, img_cache_up_cb, NULL);
+
     for (uint8_t i = j; i < NUM_TILES; i++)
     {
-        tile_t *t = &tiles[i];;
+        tile_t *t = &tiles[i];
         t->is_visible = false;
         lv_obj_align(t->img, LV_ALIGN_TOP_LEFT, -300, -300);
     }
@@ -230,8 +383,8 @@ static void lvgl_task(void *pvParameter)
 
 static void *open_cb(struct _lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mode)
 {
-    (void) drv;
-    (void) mode;
+    (void)drv;
+    (void)mode;
 
     FILE *fp = fopen(path, "rb"); // only reading is supported
     return fp;
@@ -239,7 +392,7 @@ static void *open_cb(struct _lv_fs_drv_t *drv, const char *path, lv_fs_mode_t mo
 
 static lv_fs_res_t close_cb(struct _lv_fs_drv_t *drv, void *file_p)
 {
-    (void) drv;
+    (void)drv;
 
     fclose(file_p);
     return LV_FS_RES_OK;
@@ -247,7 +400,7 @@ static lv_fs_res_t close_cb(struct _lv_fs_drv_t *drv, void *file_p)
 
 static lv_fs_res_t read_cb(struct _lv_fs_drv_t *drv, void *file_p, void *buf, uint32_t btr, uint32_t *br)
 {
-    (void) drv;
+    (void)drv;
 
     *br = fread(buf, 1, btr, file_p);
     return (*br <= 0) ? LV_FS_RES_UNKNOWN : LV_FS_RES_OK;
@@ -353,13 +506,13 @@ static void lvgl_init(void)
     static lv_fs_drv_t drv;
     lv_fs_drv_init(&drv); /*Basic initialization*/
 
-    drv.letter = 'S';               /*An uppercase letter to identify the drive */
+    drv.letter = 'S'; /*An uppercase letter to identify the drive */
     drv.ready_cb = ready_cb;
-    drv.open_cb = open_cb;          /*Callback to open a file */
-    drv.close_cb = close_cb;        /*Callback to close a file */
-    drv.read_cb = read_cb;          /*Callback to read a file */
-    drv.seek_cb = seek_cb;          /*Callback to seek in a file (Move cursor) */
-    drv.tell_cb = tell_cb;          /*Callback to tell the cursor position  */
+    drv.open_cb = open_cb;   /*Callback to open a file */
+    drv.close_cb = close_cb; /*Callback to close a file */
+    drv.read_cb = read_cb;   /*Callback to read a file */
+    drv.seek_cb = seek_cb;   /*Callback to seek in a file (Move cursor) */
+    drv.tell_cb = tell_cb;   /*Callback to tell the cursor position  */
 
     lv_fs_drv_register(&drv); /*Finally register the drive*/
 }
@@ -370,6 +523,9 @@ void app_main(void)
     esp_err_t ret;
     size_t x, y;
     uint16_t dx, dy;
+
+    img_cache = hash_map_new(IMG_CACHE_SIZE, hash_function_string,
+                             free, cache_data_free_fn, cache_equality_fn);
 
     // Options for mounting the filesystem.
     // If format_if_mount_failed is set to true, SD card will be partitioned and
@@ -424,7 +580,7 @@ void app_main(void)
     slot_config.host_id = host.slot;
 
     ret = esp_vfs_fat_sdspi_mount(mount_point, &host, &slot_config, &mount_config, &card);
-#endif //USE_SPI_MODE
+#endif // USE_SPI_MODE
 
     if (ret != ESP_OK)
     {
@@ -478,7 +634,7 @@ void app_main(void)
 
     static lv_style_t style_line;
     lv_style_init(&style_line);
-    lv_style_set_line_width (&style_line, 4);
+    lv_style_set_line_width(&style_line, 4);
     lv_style_set_line_color(&style_line, lv_palette_main(LV_PALETTE_RED));
     lv_style_set_line_rounded(&style_line, true);
 
@@ -516,7 +672,7 @@ void app_main(void)
                                       LOC_LAT, x, LOC_LON, y, z);
                 xSemaphoreGive(xGuiSemaphore);
             }
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         double lon = LOC_LON;
@@ -537,11 +693,14 @@ void app_main(void)
                                       lat, x, lon, y, MAX_ZOOM_LEVEL);
                 xSemaphoreGive(xGuiSemaphore);
             }
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(300));
         }
     }
 
     // All done, unmount partition and disable SDMMC or SPI peripheral
     esp_vfs_fat_sdcard_unmount(mount_point, card);
     ESP_LOGI(TAG, "Card unmounted");
+
+    hash_map_free(img_cache);
+    img_cache = NULL;
 }
