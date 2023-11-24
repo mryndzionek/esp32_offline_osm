@@ -7,7 +7,4 @@ Python script that converts raster map tiles to
 
 [First little app](ttgo_tcamplus_map_demo/main/main.c) runs on TTGO-Camera Plus.
 
-![ttgo_osm_demo](ttgo_tcamplus_map_demo2/media/ttgo_osm_demo.mp4)
-
-
-
+https://github.com/mryndzionek/esp32_offline_osm/assets/786191/8ca46331-3c66-436d-a113-88c9ee23194f
